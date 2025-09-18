@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tag2dir</title>
+    <style>
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto; margin:0; padding:0;}
+      header{position:sticky; top:0; background:#111; color:#fff; padding:10px 16px; z-index:10}
+      main{padding:16px}
+      .row{display:flex; gap:12px; flex-wrap:wrap; align-items:center}
+      label{font-size:14px}
+      input[type=text]{padding:6px 8px; min-width:360px}
+      button{padding:8px 12px; cursor:pointer}
+      .grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px;}
+      .card{border:1px solid #ddd; border-radius:8px; overflow:hidden; background:#fff}
+      .thumb{width:100%; aspect-ratio:1/1; object-fit:cover; background:#f2f2f2}
+      .meta{padding:8px}
+      .pill{display:inline-block; padding:2px 8px; border-radius:999px; background:#f5f5f5; margin-right:6px; font-size:12px}
+      .muted{color:#666}
+      .footer{position:sticky; bottom:0; background:#fff; border-top:1px solid #eee; padding:10px 16px; display:flex; gap:12px; align-items:center}
+      .preview{max-height:200px; overflow:auto}
+      .person-select{width:100%}
+
+      /* 预览面板样式 */
+      .preview-overlay{position:fixed; inset:0; background:rgba(0,0,0,.3); display:none; align-items:flex-end; z-index:1000}
+      .preview-panel{background:#fff; width:100%; max-height:70vh; overflow:auto; border-top-left-radius:12px; border-top-right-radius:12px; box-shadow:0 -6px 20px rgba(0,0,0,.2)}
+      .preview-header{display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid #eee}
+      .preview-body{padding:12px 16px}
+      .group{border:1px solid #eee; border-radius:8px; margin-bottom:12px}
+      .group-hd{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; background:#fafafa; cursor:pointer}
+      .group-title{font-weight:600}
+      .group-sub{color:#666; font-size:12px}
+      .group-list{padding:10px 12px; display:flex; flex-wrap:wrap; gap:8px}
+      .mini{width:88px; height:88px; object-fit:cover; background:#f2f2f2; border-radius:6px; border:1px solid #eee}
+      .close-btn{border:1px solid #ddd; background:#fff; border-radius:6px}
+      .path-badge{font-family:Consolas, monospace; background:#f6f6f6; border:1px solid #eee; padding:2px 6px; border-radius:6px; font-size:12px}
+      .empty-note{padding:12px; color:#666}
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>tag2dir</strong>
+    </header>
+    <main>
+      <div class="row">
+        <label>源目录: <input id="srcDir" type="text" placeholder="如 D:\\Photos" /></label>
+        <button id="browseSrc">浏览...</button>
+        <label>目标根目录: <input id="destRoot" type="text" placeholder="如 D:\\PhotosByPerson" /></label>
+        <button id="browseDest">浏览...</button>
+        <button id="scanBtn">扫描</button>
+      </div>
+
+  <p class="muted">扫描过程中逐张显示图片与解析结果；未识别人名时将显示“无人员”。</p>
+
+      <div id="grid" class="grid"></div>
+    </main>
+
+    <div class="footer">
+      <button id="previewBtn">生成移动预览</button>
+      <button id="moveBtn">执行移动</button>
+      <span id="status" class="muted"></span>
+    </div>
+
+    <!-- 预览面板（底部抽屉） -->
+    <div id="previewOverlay" class="preview-overlay" role="dialog" aria-modal="true">
+      <div class="preview-panel">
+        <div class="preview-header">
+          <div>
+            <strong>移动预览</strong>
+            <span id="previewSummary" class="muted" style="margin-left:8px"></span>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center">
+            <button id="previewClose" class="close-btn">关闭</button>
+          </div>
+        </div>
+        <div id="previewBody" class="preview-body"></div>
+      </div>
+    </div>
+
+    <template id="card-tmpl">
+      <div class="card">
+        <img class="thumb" />
+        <div class="meta">
+          <div class="row">
+            <select class="person-select"></select>
+          </div>
+          <div class="muted small path"></div>
+          <div class="tags"></div>
+        </div>
+      </div>
+    </template>
+
+    <script>
+      const $ = (s, el=document)=>el.querySelector(s);
+      const $$ = (s, el=document)=>Array.from(el.querySelectorAll(s));
+  const grid = $('#grid');
+  const status = $('#status');
+  const scanBtn = $('#scanBtn');
+  const moveBtn = $('#moveBtn');
+  const browseSrc = $('#browseSrc');
+  const browseDest = $('#browseDest');
+  const previewBtn = $('#previewBtn');
+  const previewOverlay = $('#previewOverlay');
+  const previewBody = $('#previewBody');
+  const previewSummary = $('#previewSummary');
+  const previewClose = $('#previewClose');
+
+      let items = [];
+      function makeThumbUrl(path, size=128){
+        return `/thumbnail?path=${encodeURIComponent(path)}&size=${size}`;
+      }
+
+      // 与后端相同的目录名清洗规则（允许中文、字母数字、下划线、连字符、点、空格）
+      function sanitizeName(name){
+        if (!name) return '';
+        const cleaned = name.replace(/[^A-Za-z0-9_\-\. \u4E00-\u9FFF]+/g, '').trim();
+        return cleaned || name || 'Unknown';
+      }
+      function createCard(item){
+        const tmpl = $('#card-tmpl').content.cloneNode(true);
+        const card = tmpl.querySelector('.card');
+        const img = tmpl.querySelector('.thumb');
+        const pathEl = tmpl.querySelector('.path');
+        const tagsEl = tmpl.querySelector('.tags');
+        const select = tmpl.querySelector('.person-select');
+
+        const url = `/thumbnail?path=${encodeURIComponent(item.path)}&size=256`;
+        img.src = url;
+        pathEl.textContent = item.path;
+
+        // people select
+        const people = item.people && item.people.length ? item.people : [];
+        for (const p of people){
+          const opt = document.createElement('option');
+          opt.value = p; opt.textContent = p;
+          select.appendChild(opt);
+        }
+        if (!people.length){
+          const opt = document.createElement('option');
+          opt.value = ''; opt.textContent = '无人员';
+          select.appendChild(opt);
+        }
+        select.value = people[0] || '';
+
+        // tags
+        if (item.tags && item.tags.length){
+          for (const t of item.tags){
+            const span = document.createElement('span');
+            span.className = 'pill';
+            span.textContent = t;
+            tagsEl.appendChild(span);
+          }
+        }
+
+        card._data = item;
+        card._select = select;
+        return card;
+      }
+
+      async function fallbackScan(srcDir){
+        try {
+          const res = await fetch('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({srcDir})});
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error||'扫描失败');
+          items = data.items || [];
+          for (const it of items){
+            const card = createCard(it);
+            grid.appendChild(card);
+          }
+          status.textContent = `共 ${items.length} 张含人员的图片`;
+        } catch (e){
+          status.textContent = e.message;
+        }
+      }
+
+      scanBtn.addEventListener('click', async ()=>{
+        const srcDir = $('#srcDir').value.trim();
+        if (!srcDir){ status.textContent = '请先选择源目录'; return; }
+        status.textContent = '扫描中...';
+        grid.innerHTML = '';
+        items = [];
+        // 优先使用 SSE 流式接口
+        try{
+          const es = new EventSource(`/api/scan_stream?srcDir=${encodeURIComponent(srcDir)}`);
+          let count = 0;
+          es.addEventListener('start', () => {
+            status.textContent = '扫描已开始...';
+          });
+          es.addEventListener('item', (ev) => {
+            try{
+              const data = JSON.parse(ev.data);
+              // 渲染每一张图片；若无人员，则下拉显示“无人员”
+              items.push({ path: data.path, people: data.people||[], tags: data.tags||[] });
+              const card = createCard(items[items.length-1]);
+              grid.appendChild(card);
+              count = data.idx || count;
+              status.textContent = `已处理 ${count} 张，已显示 ${items.length}`;
+            }catch(e){/* 忽略单条解析错误 */}
+          });
+          es.addEventListener('end', (ev) => {
+            try{
+              const data = JSON.parse(ev.data);
+              status.textContent = `扫描完成，处理 ${data.count||count} 张，含人员 ${items.length} 张`;
+            }catch{ status.textContent = `扫描完成，含人员 ${items.length} 张`; }
+            es.close();
+          });
+          es.onerror = () => {
+            // 发生错误时关闭并降级到一次性接口
+            try{ es.close(); }catch{}
+            fallbackScan(srcDir);
+          };
+        }catch(err){
+          // 降级：使用老接口一次性返回
+          await fallbackScan(srcDir);
+        }
+      });
+
+      async function browseAndFill(targetInputId){
+        const input = document.getElementById(targetInputId);
+        const initial = input.value.trim() || '';
+        status.textContent = '打开选择窗口...';
+        try{
+          const url = `/api/browse?type=dir&initial=${encodeURIComponent(initial)}&title=${encodeURIComponent('选择目录')}`;
+          const res = await fetch(url);
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error||'打开失败');
+          if (data.canceled){
+            status.textContent = '已取消';
+            return;
+          }
+          input.value = data.path || '';
+          status.textContent = '';
+        }catch(e){
+          status.textContent = e.message;
+        }
+      }
+
+      browseSrc.addEventListener('click', ()=>browseAndFill('srcDir'));
+      browseDest.addEventListener('click', ()=>browseAndFill('destRoot'));
+
+      function buildPlan(){
+        const destRoot = $('#destRoot').value.trim();
+        const plan = [];
+        for (const card of $$('.card', grid)){
+          const item = card._data;
+          const person = card._select.value.trim();
+          if (person){
+            plan.push({path:item.path, person});
+          }
+        }
+        return {destRoot, plan};
+      }
+
+      function renderPreview(destRoot, plan){
+        // 过滤无人员
+        const valid = plan.filter(x=>x.person && x.person.trim());
+        if (!valid.length){
+          previewBody.innerHTML = `<div class="empty-note">无可移动项（请先为图片选择人员）</div>`;
+          previewSummary.textContent = '';
+          return;
+        }
+        // 按“清洗后的目录名”分组，反映后端真实落盘
+        const groups = new Map(); // key: safePerson, val: {safe, items:[], persons:Set}
+        for (const x of valid){
+          const safe = sanitizeName(x.person);
+          if (!groups.has(safe)) groups.set(safe, {safe, items:[], persons:new Set()});
+          const g = groups.get(safe);
+          g.items.push(x);
+          g.persons.add(x.person);
+        }
+
+        // 汇总
+        let total = 0; groups.forEach(g=> total += g.items.length);
+        previewSummary.textContent = `共 ${total} 项，${groups.size} 个目标文件夹`;
+
+        // 构建DOM
+        const frag = document.createDocumentFragment();
+        const sorted = Array.from(groups.values()).sort((a,b)=> b.items.length - a.items.length);
+        for (const g of sorted){
+          const div = document.createElement('div');
+          div.className = 'group';
+          const others = g.persons.size>1 ? `（包含 ${g.persons.size} 个不同人名：${Array.from(g.persons).slice(0,3).join('、')}${g.persons.size>3?'…':''}）` : '';
+          const targetPath = `${destRoot}\\${g.safe}\\`;
+          div.innerHTML = `
+            <div class="group-hd" tabindex="0" role="button" aria-expanded="true">
+              <div>
+                <div class="group-title">${g.safe} <span class="group-sub">${g.items.length} 张 ${others}</span></div>
+                <div class="path-badge" title="目标路径">${targetPath}</div>
+              </div>
+              <div class="muted">展开/折叠 ▾</div>
+            </div>
+            <div class="group-list"></div>
+          `;
+          const list = div.querySelector('.group-list');
+          // 取前若干缩略图示例
+          const sample = g.items.slice(0, 12);
+          for (const it of sample){
+            const img = document.createElement('img');
+            img.className = 'mini';
+            img.loading = 'lazy';
+            img.src = makeThumbUrl(it.path, 128);
+            img.title = it.path;
+            list.appendChild(img);
+          }
+          // 折叠逻辑
+          const hd = div.querySelector('.group-hd');
+          let expanded = true;
+          function toggle(){
+            expanded = !expanded;
+            list.style.display = expanded ? '' : 'none';
+            hd.setAttribute('aria-expanded', String(expanded));
+          }
+          hd.addEventListener('click', toggle);
+          hd.addEventListener('keydown', (e)=>{ if (e.key==='Enter' || e.key===' ') { e.preventDefault(); toggle(); } });
+          frag.appendChild(div);
+        }
+        previewBody.innerHTML = '';
+        previewBody.appendChild(frag);
+      }
+
+      function openPreview(){ previewOverlay.style.display = 'flex'; }
+      function closePreview(){ previewOverlay.style.display = 'none'; }
+      previewClose.addEventListener('click', closePreview);
+      previewOverlay.addEventListener('click', (e)=>{ if (e.target===previewOverlay) closePreview(); });
+
+      previewBtn.addEventListener('click', ()=>{
+        const {destRoot, plan} = buildPlan();
+        if (!destRoot){ status.textContent = '请填写目标根目录'; return; }
+        renderPreview(destRoot, plan);
+        openPreview();
+      });
+
+      moveBtn.addEventListener('click', async ()=>{
+        const {destRoot, plan} = buildPlan();
+        if (!destRoot){ status.textContent = '请填写目标根目录'; return; }
+        if (!plan.length){ status.textContent = '无可移动项'; return; }
+        status.textContent = '执行中...';
+        try{
+          const res = await fetch('/api/move', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({destRoot, plan, dryRun:false})});
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error||'失败');
+          status.textContent = `移动完成：${data.moved.length} 成功，${data.errors.length} 失败`;
+        }catch(e){
+          status.textContent = e.message;
+        }
+      });
+    </script>
+  </body>
+</html>
