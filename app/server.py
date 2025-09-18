@@ -228,4 +228,4 @@ if __name__ == "__main__":
             pass
 
     threading.Thread(target=open_browser_when_ready, daemon=True).start()
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=False)
