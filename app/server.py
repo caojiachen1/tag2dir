@@ -2,7 +2,6 @@ import os
 import re
 import json
 from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
-from werkzeug.utils import secure_filename
 from .utils_metadata import extract_people_and_tags
 from .utils_thumbs import get_thumbnail_path, build_thumbnail
 from .utils_scan import scan_images, is_allowed_image
