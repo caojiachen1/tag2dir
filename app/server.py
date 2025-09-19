@@ -2,7 +2,7 @@ import os
 import re
 import json
 from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
-from .utils_metadata import extract_people_and_tags
+from .utils_metadata import extract_people_and_tags, has_exiftool
 from .utils_thumbs import get_thumbnail_path, build_thumbnail
 from .utils_scan import scan_images, is_allowed_image
 
@@ -18,7 +18,7 @@ def create_app():
 
     @app.get("/api/state")
     def api_state():
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "hasExiftool": bool(has_exiftool())})
 
     @app.post("/api/scan")
     def api_scan():
@@ -26,11 +26,13 @@ def create_app():
         src_dir = data.get("srcDir")
         if not src_dir or not os.path.isdir(src_dir):
             return jsonify({"ok": False, "error": "源目录不存在"}), 400
+        if not has_exiftool():
+            return jsonify({"ok": False, "error": "未检测到 exiftool，可安装 https://exiftool.org/ 并将其加入系统 PATH"}), 400
         
         results = []
         for path in scan_images(src_dir):
             people, tags = extract_people_and_tags(path)
-            # 兼容旧接口：仅当有人名时返回
+            # Compatible with old interface: only return when there are people names
             if people:
                 results.append({
                     "path": path,
@@ -41,10 +43,10 @@ def create_app():
 
     @app.get("/api/scan_stream")
     def api_scan_stream():
-        """按图片逐条推送扫描结果（SSE）。
-        参数：
-          - srcDir: 源目录
-        事件数据：
+        """Push scan results one by one per image (SSE).
+        Parameters:
+          - srcDir: source directory
+        Event data:
           {"type":"start"}
           {"type":"item", "idx", "path", "people", "tags"}
           {"type":"end", "count"}
@@ -52,20 +54,22 @@ def create_app():
         src_dir = request.args.get("srcDir")
         if not src_dir or not os.path.isdir(src_dir):
             return jsonify({"ok": False, "error": "源目录不存在"}), 400
+        if not has_exiftool():
+            return jsonify({"ok": False, "error": "未检测到 exiftool，可安装 https://exiftool.org/ 并将其加入系统 PATH"}), 400
 
         def sse_event(payload: dict, event: str | None = None) -> str:
             data = json.dumps(payload, ensure_ascii=False)
             lines = []
             if event:
                 lines.append(f"event: {event}")
-            # 按行分割，逐行发送以兼容性更好
+            # Split by lines, send line by line for better compatibility
             for line in data.splitlines() or [""]:
                 lines.append(f"data: {line}")
-            lines.append("")  # 事件结束的空行
+            lines.append("")  # Empty line to end the event
             return "\n".join(lines) + "\n"
 
         def generate():
-            # 开始事件
+            # Start event
             yield sse_event({"type": "start"}, event="start")
             idx = 0
             for path in scan_images(src_dir):
@@ -76,11 +80,11 @@ def create_app():
                     people, tags = [], []
                 item = {"type": "item", "idx": idx, "path": path, "people": people, "tags": tags}
                 yield sse_event(item, event="item")
-            # 结束事件
+            # End event
             yield sse_event({"type": "end", "count": idx}, event="end")
 
         resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
-        # 尽量避免中间代理缓冲，提升实时性
+        # Try to avoid intermediate proxy buffering to improve real-time performance
         resp.headers["Cache-Control"] = "no-cache"
         resp.headers["X-Accel-Buffering"] = "no"
         resp.headers["Connection"] = "keep-alive"
@@ -102,24 +106,24 @@ def create_app():
 
     @app.get("/api/browse")
     def api_browse():
-        """打开原生系统选择对话框，返回所选路径。
-        参数：
-          - type: 'dir' | 'file'，默认 'dir'
-          - initial: 初始目录
-          - title: 对话框标题
-        返回：{ ok, path, canceled? }
+        """Open native system selection dialog, return selected path.
+        Parameters:
+          - type: 'dir' | 'file', default 'dir'
+          - initial: initial directory
+          - title: dialog title
+        Returns: { ok, path, canceled? }
         """
         typ = request.args.get("type", "dir").lower()
         initial = request.args.get("initial") or os.getcwd()
         title = request.args.get("title") or ("选择文件" if typ == "file" else "选择目录")
         try:
-            # 延迟导入，避免在无 GUI 环境提前失败
+            # Delayed import to avoid early failure in non-GUI environments
             import tkinter as tk
             from tkinter import filedialog
 
             root = tk.Tk()
             root.withdraw()
-            # 置顶，避免在浏览器后面看不到
+            # Set to topmost to avoid being hidden behind the browser
             try:
                 root.attributes("-topmost", True)
             except Exception:
@@ -129,7 +133,7 @@ def create_app():
             if typ == "file":
                 selected = filedialog.askopenfilename(initialdir=initial, title=title)
             else:
-                # 选择目录；允许新建不存在的目录（Windows 下将返回用户输入的新路径）
+                # Select directory; allow creating non-existent directories (on Windows, it will return the new path entered by the user)
                 selected = filedialog.askdirectory(initialdir=initial, title=title, mustexist=False)
             try:
                 root.destroy()
@@ -179,12 +183,12 @@ def create_app():
             if not os.path.isfile(src):
                 errors.append({"path": src, "error": "源文件不存在"})
                 continue
-            # 目标目录名：去除非法字符，同时尽量保留中文
+            # Target directory name: remove illegal characters, while trying to preserve Chinese
             def sanitize_name(name: str) -> str:
-                # 允许中文、英文、数字、空格、下划线、连字符与点号
+                # Allow Chinese, English, numbers, spaces, underscores, hyphens and dots
                 allowed = re.compile(r"[^\w\-\u4e00-\u9fa5\. ]+", re.UNICODE)
                 out = allowed.sub("", name).strip()
-                # 避免只剩空字符串
+                # Avoid leaving only empty string
                 return out or person or "Unknown"
 
             safe_person = sanitize_name(person)
@@ -195,12 +199,12 @@ def create_app():
                 if not dry_run:
                     os.makedirs(target_dir, exist_ok=True)
                     if os.path.abspath(src) != os.path.abspath(target_path):
-                        # 避免跨盘剪切导致失败，使用复制+删除，尽量保留元数据
+                        # Avoid failure caused by cross-disk cutting, use copy+delete, try to preserve metadata
                         shutil.copy2(src, target_path)
                         try:
                             os.remove(src)
                         except Exception:
-                            # 如果删除失败，回滚目标文件
+                            # If deletion fails, rollback the target file
                             try:
                                 os.remove(target_path)
                             except Exception:

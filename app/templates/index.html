@@ -51,7 +51,13 @@
         <button id="scanBtn">扫描</button>
       </div>
 
-  <p class="muted">扫描过程中逐张显示图片与解析结果；未识别人名时将显示“无人员”。</p>
+  <div id="exiftoolWarn" style="display:none; padding:10px 12px; border:1px solid #f5c2c7; background:#f8d7da; color:#842029; border-radius:8px; margin:8px 0;">
+    <strong>缺少依赖：</strong>未检测到 exiftool。请安装 ExifTool CLI 并将其添加到系统 PATH。
+    <div class="muted" style="margin-top:4px; font-size:12px; color:#842029;">
+      Windows 可下载 exiftool(-k).exe，重命名为 exiftool.exe 放入任意 PATH 目录，或将所在目录加入 PATH；官网：
+      <a href="https://exiftool.org/" target="_blank" rel="noreferrer" style="color:#5c2d91;">exiftool.org</a>
+    </div>
+  </div>
 
       <div id="grid" class="grid"></div>
     </main>
@@ -107,6 +113,26 @@
   const previewClose = $('#previewClose');
 
       let items = [];
+      // 首次加载：检测 exiftool 可用性，决定是否禁用扫描按钮
+      (async function initState(){
+        try{
+          const res = await fetch('/api/state');
+          const data = await res.json();
+          const has = !!(data && data.hasExiftool);
+          if (!has){
+            $('#exiftoolWarn').style.display = '';
+            scanBtn.disabled = true;
+            scanBtn.title = '未检测到 exiftool，无法扫描';
+          } else {
+            $('#exiftoolWarn').style.display = 'none';
+            scanBtn.disabled = false;
+            scanBtn.title = '';
+          }
+        }catch{
+          // 若状态查询失败，不主动禁用，但给出提示区域
+        }
+      })();
+
       function makeThumbUrl(path, size=128){
         return `/thumbnail?path=${encodeURIComponent(path)}&size=${size}`;
       }
