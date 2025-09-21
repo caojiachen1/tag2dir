@@ -28,11 +28,30 @@ def _from_exiftool_cli(path: str) -> Tuple[List[str], List[str]]:
     if not _HAS_EXIFTOOL:
         return people, tags
     
+    class MockResult:
+        def __init__(self, stdout, returncode):
+            self.stdout = stdout
+            self.returncode = returncode
+    
+    def decode_output(stdout_bytes):
+        """Safely decode subprocess output bytes to string."""
+        if not stdout_bytes:
+            return ""
+        try:
+            return stdout_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                import locale
+                system_encoding = locale.getpreferredencoding()
+                return stdout_bytes.decode(system_encoding, errors='replace')
+            except:
+                return stdout_bytes.decode('utf-8', errors='replace')
+    
     try:
         # First attempt: use standard UTF-8 settings
         result = None
         try:
-            result = subprocess.run([
+            raw_result = subprocess.run([
                 'exiftool', 
                 '-json',  # JSON output
                 '-all',   # Fetch all metadata
@@ -42,14 +61,16 @@ def _from_exiftool_cli(path: str) -> Tuple[List[str], List[str]]:
                 '-escape', 'xml',  # Escape special characters as XML
                 '-ignoreMinorErrors',  # Ignore minor errors
                 path
-            ], capture_output=True, text=True, timeout=30, encoding='utf-8')
+            ], capture_output=True, timeout=30)
+            if raw_result.returncode == 0 and raw_result.stdout:
+                result = MockResult(decode_output(raw_result.stdout), raw_result.returncode)
         except Exception:
             pass
         
         # If the first attempt fails or returns empty output, try different charset options
         if not result or result.returncode != 0 or not result.stdout.strip():
             try:
-                result = subprocess.run([
+                raw_result = subprocess.run([
                     'exiftool', 
                     '-json',
                     '-all',
@@ -59,45 +80,25 @@ def _from_exiftool_cli(path: str) -> Tuple[List[str], List[str]]:
                     '-charset', 'xmp=utf8',       # Use UTF-8 for XMP
                     '-ignoreMinorErrors',
                     path
-                ], capture_output=True, text=True, timeout=30, encoding='utf-8')
+                ], capture_output=True, timeout=30)
+                if raw_result.returncode == 0 and raw_result.stdout:
+                    result = MockResult(decode_output(raw_result.stdout), raw_result.returncode)
             except Exception:
                 pass
         
         # If it still fails, try the most basic settings
         if not result or result.returncode != 0:
             try:
-                # On Windows we may need to use the system default encoding
-                import locale
-                system_encoding = locale.getpreferredencoding()
-                
                 raw_result = subprocess.run([
                     'exiftool', 
                     '-json',
                     '-all',
-                    '-charset', system_encoding,  # Use system encoding
                     path
                 ], capture_output=True, timeout=30)
                 
                 # Manually convert bytes to string
                 if raw_result.stdout and raw_result.returncode == 0:
-                    stdout_text = ""
-                    try:
-                        # Try decoding as UTF-8
-                        stdout_text = raw_result.stdout.decode('utf-8')
-                    except UnicodeDecodeError:
-                        try:
-                            # Try decoding with system encoding
-                            stdout_text = raw_result.stdout.decode(system_encoding, errors='replace')
-                        except:
-                            # Fallback: decode with replacement
-                            stdout_text = raw_result.stdout.decode('utf-8', errors='replace')
-                    
-                    # Create a mock result object
-                    class MockResult:
-                        def __init__(self, stdout, returncode):
-                            self.stdout = stdout
-                            self.returncode = returncode
-                    
+                    stdout_text = decode_output(raw_result.stdout)
                     result = MockResult(stdout_text, raw_result.returncode)
                             
             except Exception:
