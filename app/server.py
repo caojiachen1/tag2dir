@@ -12,6 +12,10 @@ def create_app():
     app.config["CACHE_DIR"] = os.path.abspath(os.path.join(app.root_path, "cache"))
     os.makedirs(app.config["CACHE_DIR"], exist_ok=True)
 
+    # Keep a bounded in-memory history of move batches for undo
+    move_history: list[dict] = []  # each item: {"moved": [...], "errors": [...], "meta": {...}}
+    MOVE_HISTORY_MAX = 20
+
     @app.get("/")
     def index():
         return render_template("index.html")
@@ -213,7 +217,93 @@ def create_app():
                 moved.append({"from": src, "to": target_path})
             except Exception as e:
                 errors.append({"path": src, "error": str(e)})
+        # Record into history for undo if real move happened
+        if not dry_run and moved:
+            move_history.append({
+                "moved": moved,
+                "errors": errors,
+                "meta": {"destRoot": dest_root}
+            })
+            # Bound history size
+            if len(move_history) > MOVE_HISTORY_MAX:
+                move_history[:] = move_history[-MOVE_HISTORY_MAX:]
         return jsonify({"ok": True, "moved": moved, "errors": errors})
+
+    @app.post("/api/undo_move")
+    def api_undo_move():
+        """Undo one or multiple last move batches.
+        Body: { count?: number, strategy?: 'unique'|'skip' }
+          - count: how many batches to undo, default 1
+          - strategy: when restoring and original path exists
+              'unique' (default): create a unique path like "name (1).ext"
+              'skip': skip restoring that file
+        Returns: { ok, undone: [{from,to}], errors: [...] , undoneBatches }
+        """
+        data = request.get_json(force=True) or {}
+        count = int(data.get("count", 1))
+        strategy = str(data.get("strategy", "unique")).lower()
+        if count <= 0:
+            return jsonify({"ok": False, "error": "count 必须为正整数"}), 400
+
+        import shutil
+
+        def unique_target(path: str) -> str:
+            if not os.path.exists(path):
+                return path
+            base, ext = os.path.splitext(path)
+            i = 1
+            while True:
+                cand = f"{base} ({i}){ext}"
+                if not os.path.exists(cand):
+                    return cand
+                i += 1
+
+        undone = []
+        errors = []
+        undone_batches = 0
+
+        while count > 0 and move_history:
+            batch = move_history.pop()
+            moved_list = list(batch.get("moved", []))
+            # Undo in reverse order to be safe
+            for rec in reversed(moved_list):
+                dst_path = rec.get("to")
+                src_path = rec.get("from")
+                if not dst_path or not src_path:
+                    continue
+                if not os.path.exists(dst_path):
+                    errors.append({"path": dst_path, "error": "目标文件不存在，无法撤销"})
+                    continue
+                # Decide restore destination
+                restore_path = src_path
+                if os.path.exists(restore_path):
+                    if strategy == "unique":
+                        restore_path = unique_target(restore_path)
+                    else:
+                        # skip when conflict
+                        errors.append({"path": restore_path, "error": "源位置已存在同名文件，已跳过"})
+                        continue
+                try:
+                    os.makedirs(os.path.dirname(restore_path), exist_ok=True)
+                    shutil.copy2(dst_path, restore_path)
+                    try:
+                        os.remove(dst_path)
+                    except Exception:
+                        # Rollback restore if we failed to remove from dst
+                        try:
+                            os.remove(restore_path)
+                        except Exception:
+                            pass
+                        raise
+                    undone.append({"from": dst_path, "to": restore_path})
+                except Exception as e:
+                    errors.append({"path": dst_path, "error": str(e)})
+            undone_batches += 1
+            count -= 1
+
+        if undone_batches == 0:
+            return jsonify({"ok": True, "undone": [], "errors": [], "message": "无可撤销的历史记录"})
+        return jsonify({"ok": True, "undone": undone, "errors": errors, "undoneBatches": undone_batches})
 
     return app
 

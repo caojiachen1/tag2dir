@@ -65,6 +65,7 @@
     <div class="footer">
       <button id="previewBtn">生成移动预览</button>
       <button id="moveBtn">执行移动</button>
+  <button id="undoBtn" title="撤销上次移动 (Ctrl+Z)">撤销上次移动</button>
       <span id="status" class="muted"></span>
     </div>
 
@@ -107,6 +108,7 @@
   const browseSrc = $('#browseSrc');
   const browseDest = $('#browseDest');
   const previewBtn = $('#previewBtn');
+  const undoBtn = $('#undoBtn');
   const previewOverlay = $('#previewOverlay');
   const previewBody = $('#previewBody');
   const previewSummary = $('#previewSummary');
@@ -369,6 +371,33 @@
           status.textContent = `移动完成：${data.moved.length} 成功，${data.errors.length} 失败`;
         }catch(e){
           status.textContent = e.message;
+        }
+      });
+
+      // 撤销：默认撤销一批（一次点击“执行移动”产生的一批移动记录）
+      undoBtn.addEventListener('click', async ()=>{
+        status.textContent = '撤销中...';
+        try{
+          const res = await fetch('/api/undo_move', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({count:1, strategy:'unique'})});
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error||'撤销失败');
+          const undone = data.undone || [];
+          const errs = data.errors || [];
+          if ((undone.length||0)===0 && (errs.length||0)===0){
+            status.textContent = data.message || '无可撤销记录';
+          } else {
+            status.textContent = `撤销完成：${undone.length} 成功，${errs.length} 失败`;
+          }
+        }catch(e){
+          status.textContent = e.message;
+        }
+      });
+
+      // 快捷键：Ctrl+Z 撤销
+      window.addEventListener('keydown', (e)=>{
+        if ((e.ctrlKey||e.metaKey) && (e.key==='z' || e.key==='Z')){
+          e.preventDefault();
+          undoBtn.click();
         }
       });
     </script>
