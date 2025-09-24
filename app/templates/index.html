@@ -192,11 +192,14 @@
           const data = await res.json();
           if (!data.ok) throw new Error(data.error||'扫描失败');
           items = data.items || [];
+          let withPeople = 0;
           for (const it of items){
+            if (Array.isArray(it.people) && it.people.length>0) withPeople += 1;
             const card = createCard(it);
             grid.appendChild(card);
           }
-          status.textContent = `共 ${items.length} 张含人员的图片`;
+          status.textContent = `扫描完成，共 ${items.length} 张（含人员 ${withPeople} 张）`;
+            try { console.log('[scan] done:', { total: items.length, withPeople }); } catch {}
         } catch (e){
           status.textContent = e.message;
         }
@@ -208,6 +211,9 @@
         status.textContent = '扫描中...';
         grid.innerHTML = '';
         items = [];
+        // 统计：processed 为总处理数，withPeople 为含人员数
+        let processed = 0;
+        let withPeople = 0;
         // 优先使用 SSE 流式接口
         try{
           const es = new EventSource(`/api/scan_stream?srcDir=${encodeURIComponent(srcDir)}`);
@@ -218,19 +224,23 @@
           es.addEventListener('item', (ev) => {
             try{
               const data = JSON.parse(ev.data);
-              // 渲染每一张图片；若无人员，则下拉显示“无人员”
-              items.push({ path: data.path, people: data.people||[], tags: data.tags||[] });
-              const card = createCard(items[items.length-1]);
+              // 显示所有图片，同时单独统计“含人员”
+              const people = Array.isArray(data.people) ? data.people : [];
+              const item = { path: data.path, people, tags: data.tags||[] };
+              items.push(item);
+              const card = createCard(item);
               grid.appendChild(card);
-              count = data.idx || count;
-              status.textContent = `已处理 ${count} 张，已显示 ${items.length}`;
+              if (people.length > 0) withPeople += 1;
+              processed = data.idx || processed;
+              status.textContent = `已处理 ${processed} 张（含人员 ${withPeople} 张）`;
             }catch(e){/* 忽略单条解析错误 */}
           });
           es.addEventListener('end', (ev) => {
             try{
               const data = JSON.parse(ev.data);
-              status.textContent = `扫描完成，处理 ${data.count||count} 张，含人员 ${items.length} 张`;
-            }catch{ status.textContent = `扫描完成，含人员 ${items.length} 张`; }
+              status.textContent = `扫描完成，共 ${data.count||processed} 张（含人员 ${withPeople} 张）`;
+                try { console.log('[scan_stream] done:', { total: data.count||processed, withPeople }); } catch {}
+            }catch{ status.textContent = `扫描完成，共 ${processed} 张（含人员 ${withPeople} 张）`; }
             es.close();
           });
           es.onerror = () => {

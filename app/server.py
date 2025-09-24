@@ -36,13 +36,12 @@ def create_app():
         results = []
         for path in scan_images(src_dir):
             people, tags = extract_people_and_tags(path)
-            # Compatible with old interface: only return when there are people names
-            if people:
-                results.append({
-                    "path": path,
-                    "people": people,
-                    "tags": tags,
-                })
+            # Return all images, including those without people (people may be an empty array)
+            results.append({
+                "path": path,
+                "people": people or [],
+                "tags": tags or [],
+            })
         return jsonify({"ok": True, "items": results})
 
     @app.get("/api/scan_stream")
